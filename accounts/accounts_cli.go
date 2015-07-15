@@ -10,7 +10,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/codegangsta/cli"
@@ -19,59 +18,38 @@ import (
 
 // Represents the user running the audit on the accounts that they have access to via permissons
 type admin struct {
-	host   string
-	client *http.Client
-	User   struct {
+	User struct {
 		Id    string `json:"userid"`
 		Name  string `json:"username"`
 		Token string `json:"-"`
 	} `json:"administrator"`
-	Accounts `json:"administeredAccounts"`
+	Users `json:"administeredAccounts"`
 }
 
-// Account details that we will audit
-type Account struct {
-	Id      string `json:"userid"`
-	Profile struct {
-		FullName string `json:"fullName"`
-		Patient  struct {
-			Bday string `json:"birthday"`
-			Dday string `json:"diagnosisDate"`
-		} `json:"patient"`
-	} `json:"patientProfile"`
-	Perms      interface{} `json:"permissons"`
-	LastUpload string      `json:"lastupload"`
-}
+///////////////////
+// UserAccount code
+///////////////////
 
-type AccountBasics struct {
+type UserAccount struct {
 	Id         string `json:"userid"`
 	FullName   string `json:"fullName"`
-	LastUpload string `json:"lastUpload"`
+	LastUpload string `json:"lastupload"`
 }
 
-type Accounts []*Account
-type Basics []*AccountBasics
-
-func (a Accounts) ToBasics() Basics {
-	var basics Basics
-	for i := range a {
-		basics = append(basics, &AccountBasics{Id: a[i].Id, FullName: a[i].Profile.FullName, LastUpload: a[i].LastUpload})
-	}
-	return basics
-}
+type Users []*UserAccount
 
 // from http://golang.org/pkg/sort/#example_Interface
-func (a Accounts) sortByName() Accounts {
-	name := func(a1, a2 *Account) bool {
+func (a Users) sortByName() Users {
+	name := func(a1, a2 *UserAccount) bool {
 		//alpha order
-		return a1.Profile.FullName > a2.Profile.FullName
+		return a1.FullName > a2.FullName
 	}
 	By(name).sort(a)
 	return a
 }
 
-func (a Accounts) sortByUpload() Accounts {
-	upload := func(a1, a2 *Account) bool {
+func (a Users) sortByUpload() Users {
+	upload := func(a1, a2 *UserAccount) bool {
 		//return accounts that have a `LastUpload` first
 		return a1.LastUpload > a2.LastUpload
 	}
@@ -79,8 +57,8 @@ func (a Accounts) sortByUpload() Accounts {
 	return a
 }
 
-func (a Accounts) hasUploads() Accounts {
-	var withUploads Accounts
+func (a Users) hasUploads() Users {
+	var withUploads Users
 
 	for i := range a {
 		if a[i].LastUpload != "" {
@@ -90,9 +68,9 @@ func (a Accounts) hasUploads() Accounts {
 	return withUploads
 }
 
-type By func(a1, a2 *Account) bool
+type By func(a1, a2 *UserAccount) bool
 
-func (by By) sort(accounts Accounts) {
+func (by By) sort(accounts Users) {
 	as := &accountSorter{
 		accounts: accounts,
 		by:       by,
@@ -101,8 +79,8 @@ func (by By) sort(accounts Accounts) {
 }
 
 type accountSorter struct {
-	accounts Accounts
-	by       func(a1, a2 *Account) bool
+	accounts Users
+	by       func(a1, a2 *UserAccount) bool
 }
 
 //All part of the sort interface
@@ -110,12 +88,191 @@ func (s *accountSorter) Len() int           { return len(s.accounts) }
 func (s *accountSorter) Swap(i, j int)      { s.accounts[i], s.accounts[j] = s.accounts[j], s.accounts[i] }
 func (s *accountSorter) Less(i, j int) bool { return s.by(s.accounts[i], s.accounts[j]) }
 
+///////////////////
+// Platform
+///////////////////
+
 var (
 	prodHost    = "https://api.tidepool.io"
 	stagingHost = "https://staging-api.tidepool.io"
 	develHost   = "https://devel-api.tidepool.io"
 	localHost   = "http://localhost:8009"
 )
+
+type platform struct {
+	host   string
+	client *http.Client
+	*admin
+}
+
+func initPlatform(targetEnv string) *platform {
+
+	targetEnv = strings.ToLower(targetEnv)
+	fmt.Println("Run audit against:", targetEnv)
+
+	if targetEnv == "devel" {
+		return &platform{host: develHost, client: &http.Client{}, admin: &admin{}}
+	} else if targetEnv == "prod" {
+		return &platform{host: prodHost, client: &http.Client{}, admin: &admin{}}
+	} else if targetEnv == "staging" {
+		return &platform{host: stagingHost, client: &http.Client{}, admin: &admin{}}
+	} else if targetEnv == "local" {
+		return &platform{host: localHost, client: &http.Client{}, admin: &admin{}}
+	}
+	log.Fatal("No matching environment found")
+	return nil
+}
+
+func (p *platform) getProfile(acc *UserAccount) error {
+
+	urlPath := p.host + fmt.Sprintf("/metadata/%s/profile", acc.Id)
+
+	req, err := http.NewRequest("GET", urlPath, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Add("x-tidepool-session-token", p.admin.User.Token)
+
+	res, err := p.client.Do(req)
+
+	if err != nil {
+		return errors.New("Could attempt to find profile: " + err.Error())
+	}
+
+	switch res.StatusCode {
+	case 200:
+		defer res.Body.Close()
+		data, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return err
+		}
+		json.Unmarshal(data, &acc)
+		return nil
+	default:
+		log.Printf("Failed finding public info [%d] for [%s]", res.StatusCode, acc.Id)
+		return nil
+	}
+}
+
+func (p *platform) getLastUpload(acc *UserAccount) error {
+
+	urlPath := p.host + fmt.Sprintf("/query/upload/lastentry/%s", acc.Id)
+
+	req, _ := http.NewRequest("GET", urlPath, nil)
+	req.Header.Add("x-tidepool-session-token", p.admin.User.Token)
+
+	res, err := p.client.Do(req)
+
+	if err != nil {
+		return errors.New("Could attempt to find the last upload: " + err.Error())
+	}
+
+	switch res.StatusCode {
+	case 200:
+
+		defer res.Body.Close()
+		data, err := ioutil.ReadAll(res.Body)
+
+		if err != nil {
+			log.Println("Error trying to read the last upload data", err.Error())
+			return nil
+		}
+
+		json.Unmarshal(data, &acc.LastUpload)
+		return nil
+	default:
+		log.Printf("Failed finding last upload info [%d] for [%s]", res.StatusCode, acc.FullName)
+		return nil
+	}
+}
+
+func (p *platform) login(un, pw string) error {
+
+	urlPath := p.host + "/auth/login"
+
+	req, err := http.NewRequest("POST", urlPath, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(un, pw)
+
+	res, err := p.client.Do(req)
+	if err != nil {
+		return errors.New(fmt.Sprint("Login request failed", err.Error()))
+	}
+
+	switch res.StatusCode {
+	case 200:
+		defer res.Body.Close()
+		data, _ := ioutil.ReadAll(res.Body)
+		json.Unmarshal(data, &p.admin.User)
+		p.admin.User.Token = res.Header.Get("x-tidepool-session-token")
+		return nil
+	default:
+		return errors.New(fmt.Sprint("Login failed", res.StatusCode))
+	}
+}
+
+func (p *platform) getAdminUsers() error {
+
+	urlPath := p.host + fmt.Sprintf("/access/groups/%s", p.admin.User.Id)
+
+	req, err := http.NewRequest("GET", urlPath, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Add("x-tidepool-session-token", p.admin.User.Token)
+
+	res, err := p.client.Do(req)
+	if err != nil {
+		return errors.New("Could attempt to find administered accounts: " + err.Error())
+	}
+
+	switch res.StatusCode {
+	case 200:
+		defer res.Body.Close()
+		data, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return err
+		}
+
+		var raw map[string]interface{}
+
+		json.Unmarshal(data, &raw)
+
+		for key, _ := range raw {
+			p.admin.Users = append(p.admin.Users, &UserAccount{Id: string(key)})
+		}
+		return nil
+	default:
+		log.Println("Failed finding profiles", res.StatusCode)
+		return nil
+	}
+}
+
+///////////////////
+// Admin
+///////////////////
+
+func (a *admin) loadExistingReport(path string) error {
+	log.Println("loading existing report ...", path)
+
+	rf, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+
+	jsonParser := json.NewDecoder(rf)
+	if err = jsonParser.Decode(&a); err != nil {
+		return err
+	}
+	rf.Close()
+	return nil
+}
+
+///////////////////
+// App code
+///////////////////
 
 func main() {
 
@@ -171,212 +328,6 @@ func main() {
 	app.Run(os.Args)
 }
 
-func (a *admin) findPublicInfo(acc *Account) error {
-
-	urlPath := a.host + fmt.Sprintf("/metadata/%s/profile", acc.Id)
-
-	req, err := http.NewRequest("GET", urlPath, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Add("x-tidepool-session-token", a.User.Token)
-
-	res, err := a.client.Do(req)
-
-	if err != nil {
-		return errors.New("Could attempt to find profile: " + err.Error())
-	}
-
-	switch res.StatusCode {
-	case 200:
-		data, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return err
-		}
-		json.Unmarshal(data, &acc.Profile)
-		return nil
-	default:
-		log.Printf("Failed finding public info [%d] for [%s]", res.StatusCode, acc.Id)
-		return nil
-	}
-}
-
-func (a *admin) findLastUploaded(acc *Account) error {
-
-	urlPath := a.host + fmt.Sprintf("/query/upload/lastentry/%s", acc.Id)
-
-	req, _ := http.NewRequest("GET", urlPath, nil)
-	req.Header.Add("x-tidepool-session-token", a.User.Token)
-
-	res, err := a.client.Do(req)
-
-	if err != nil {
-		return errors.New("Could attempt to find the last upload: " + err.Error())
-	}
-
-	switch res.StatusCode {
-	case 200:
-		data, err := ioutil.ReadAll(res.Body)
-
-		if err != nil {
-			log.Println("Error trying to read the last upload data", err.Error())
-			return nil
-		}
-
-		json.Unmarshal(data, &acc.LastUpload)
-		return nil
-	default:
-		log.Printf("Failed finding last upload info [%d] for [%s]", res.StatusCode, acc.Profile.FullName)
-		return nil
-	}
-}
-
-func (a *admin) login(un, pw string) error {
-
-	urlPath := a.host + "/auth/login"
-
-	req, err := http.NewRequest("POST", urlPath, nil)
-	if err != nil {
-		return err
-	}
-	req.SetBasicAuth(un, pw)
-
-	res, err := a.client.Do(req)
-	if err != nil {
-		return errors.New(fmt.Sprint("Login request failed", err.Error()))
-	}
-
-	switch res.StatusCode {
-	case 200:
-		data, _ := ioutil.ReadAll(res.Body)
-		json.Unmarshal(data, &a.User)
-		a.User.Token = res.Header.Get("x-tidepool-session-token")
-		return nil
-	default:
-		return errors.New(fmt.Sprint("Login failed", res.StatusCode))
-	}
-}
-
-func (a *admin) findAccounts() error {
-
-	urlPath := a.host + fmt.Sprintf("/access/groups/%s", a.User.Id)
-
-	req, err := http.NewRequest("GET", urlPath, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Add("x-tidepool-session-token", a.User.Token)
-
-	res, err := a.client.Do(req)
-	if err != nil {
-		return errors.New("Could attempt to find administered accounts: " + err.Error())
-	}
-
-	switch res.StatusCode {
-	case 200:
-		data, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return err
-		}
-
-		var raw map[string]interface{}
-
-		json.Unmarshal(data, &raw)
-
-		for key, value := range raw {
-			a.Accounts = append(a.Accounts, &Account{Id: string(key), Perms: value})
-		}
-		return nil
-	default:
-		log.Println("Failed finding profiles", res.StatusCode)
-		return nil
-	}
-}
-
-func (a *admin) loadExistingReport(path string) error {
-	log.Println("loading audit report ...")
-
-	rf, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-
-	jsonParser := json.NewDecoder(rf)
-	if err = jsonParser.Decode(&a); err != nil {
-		return err
-	}
-	rf.Close()
-	return nil
-}
-
-func (a *admin) accountDetails() {
-	var wg sync.WaitGroup
-
-	for _, account := range a.Accounts {
-		// Increment the WaitGroup counter.
-		wg.Add(1)
-		// Launch a goroutine to account data
-		go func(account *Account) {
-			// Decrement the counter when the goroutine completes.
-			defer wg.Done()
-			// Fetch the account data
-			a.findPublicInfo(account)
-		}(account)
-	}
-	// Wait for all fetches to complete.
-	wg.Wait()
-	return
-}
-
-func (a *admin) doAudit(acc *Account) error {
-	return a.findLastUploaded(acc)
-}
-
-func (a *admin) audit() {
-
-	var wg sync.WaitGroup
-
-	for _, account := range a.Accounts {
-		// Increment the WaitGroup counter.
-		wg.Add(1)
-		// Launch a goroutine to account data
-		go func(account *Account) {
-			// Decrement the counter when the goroutine completes.
-			defer wg.Done()
-			if err := a.findLastUploaded(account); err != nil {
-				//just die
-				log.Println("Failed while running findLastUploaded for account")
-				//log.Println(err.Error())
-				wg.Done()
-				return
-			}
-			//time.Sleep(time.Second * 3) //pause between each
-		}(account)
-	}
-	// Wait for all fetches to complete.
-	wg.Wait()
-	return
-}
-
-func setHost(targetEnv string) string {
-
-	targetEnv = strings.ToLower(targetEnv)
-
-	fmt.Println("Run audit against:", targetEnv)
-
-	if targetEnv == "devel" {
-		return develHost
-	} else if targetEnv == "prod" {
-		return prodHost
-	} else if targetEnv == "staging" {
-		return stagingHost
-	} else if targetEnv == "local" {
-		return localHost
-	}
-	log.Fatal("No matching environment found")
-	return ""
-}
-
 // and audit will find all account linked
 func auditAccounts(c *cli.Context) {
 
@@ -388,168 +339,105 @@ func auditAccounts(c *cli.Context) {
 		log.Fatal("Please specify the environment your running against with the --env or -e flag.")
 	}
 
-	adminUser := &admin{host: setHost(c.String("env")), client: &http.Client{}}
+	tPlatform := initPlatform(c.String("env"))
 
 	fmt.Printf("Password: ")
 	pass := gopass.GetPasswdMasked()
 
-	err := adminUser.login(c.String("username"), string(pass[:]))
+	err := tPlatform.login(c.String("username"), string(pass[:]))
 	if err != nil {
+		log.Println("Login failure")
 		log.Println(err.Error())
 		return
 	}
 
-	if c.String("reportpath") == "" {
-
-		//get accounts I can view
-		log.Println("finding administered accounts ...")
-		err = adminUser.findAccounts()
-		if err != nil {
-			log.Println(err.Error())
-			return
-		}
-		log.Println("get users info ...")
-		adminUser.accountDetails()
-
-	} else {
-		//find the accociated profiles
-		log.Println("re-running audit on accounts ...")
-
-		err = adminUser.loadExistingReport(c.String("reportpath"))
-		if err != nil {
-			log.Println("error loading existing report")
-			log.Println(err.Error())
-			return
-		}
-	}
-
-	//for each account run the audit
-
 	start := time.Now()
-	const block_size = 200
 
-	if block_size >= len(adminUser.Accounts) {
-		log.Println("running audit on accounts ...")
-		adminUser.audit()
-		log.Printf("audit took [%f]secs", time.Now().Sub(start).Seconds())
+	if c.String("reportpath") != "" {
+		tPlatform.admin.loadExistingReport(c.String("reportpath"))
 	} else {
-		log.Println("you have ", len(adminUser.Accounts), "account and ")
-	}
-
-	if len(adminUser.Accounts) > block_size {
-
-		total := len(adminUser.Accounts)
-
-		log.Println("building audits ...", total, "accounts")
-		//split and create reports
-		blocks := len(adminUser.Accounts) / block_size
-
-		log.Println("run as", blocks, "blocks")
-
-		var reports []Accounts
-		count := 0
-
-		for i := 0; i < blocks; i++ {
-			reports = append(reports, adminUser.Accounts[count:count+block_size])
-			count = count + block_size
-		}
-		//get the last ones
-		if total > count {
-			log.Println("get the last ones... from", count, "to", total)
-			reports = append(reports, adminUser.Accounts[count:total])
-		}
-
-		//each block of reports
-		for y := range reports {
-
-			rpt := adminUser
-			rpt.Accounts = reports[y].sortByUpload()
-
-			jsonRpt, err := json.MarshalIndent(rpt, "", "  ")
-
-			if err != nil {
-				log.Println("error creating audit content")
-				log.Println(err.Error())
-				return
-			}
-
-			reportPath := fmt.Sprintf("./audit_%s_accounts_%s_part-%d_%s.txt", adminUser.User.Name, c.String("env"), y, time.Now().UTC().Format(time.RFC3339))
-
-			f, err := os.Create(reportPath)
-			if err != nil {
-				log.Println("error creating audit file")
-				log.Println(err.Error())
-				return
-			}
-			defer f.Close()
-			f.Write(jsonRpt)
-			log.Println("done! here is the audit " + reportPath)
-		}
-
-	} else {
-
-		log.Println("building audit ...")
-		adminUser.Accounts = adminUser.Accounts.sortByUpload()
-
-		jsonRpt, err := json.MarshalIndent(adminUser, "", "  ")
+		log.Println("finding user accounts ...")
+		err = tPlatform.getAdminUsers()
 		if err != nil {
-			log.Println("error creating audit content")
+			log.Println("failed getting user accounts")
 			log.Println(err.Error())
 			return
 		}
 
-		if c.String("reportpath") == "" {
-
-			reportPath := fmt.Sprintf("./audit_%s_accounts_%s_%s.txt", adminUser.User.Name, c.String("env"), time.Now().UTC().Format(time.RFC3339))
-
-			f, err := os.Create(reportPath)
-			if err != nil {
-				log.Println("error creating audit file")
+		log.Println("get info for each user account")
+		for _, account := range tPlatform.admin.Users {
+			// Fetch the account data for each account
+			if err := tPlatform.getProfile(account); err != nil {
+				log.Println("failed getting user account info")
 				log.Println(err.Error())
 				return
 			}
-			defer f.Close()
-			f.Write(jsonRpt)
-			log.Println("done! here is the audit " + reportPath)
-			return
 		}
-
-		err = ioutil.WriteFile(c.String("reportpath"), jsonRpt, 0644)
-		if err != nil {
-			log.Println("error updating audit file")
-			log.Println(err.Error())
-			return
-		}
-
 	}
 
+	log.Println("get last upload for each user")
+	for _, acc := range tPlatform.admin.Users {
+		log.Println("for", acc.Id, "getting lastupload ...")
+		if err := tPlatform.getLastUpload(acc); err != nil {
+			if err != nil {
+				log.Println("failed getting last upload for user accounts")
+				log.Println(err.Error())
+				return
+			}
+		}
+		log.Println("for", acc.Id, "got", acc.LastUpload)
+	}
+
+	tPlatform.admin.Users = tPlatform.admin.Users.sortByUpload()
+
+	jsonRpt, err := json.MarshalIndent(tPlatform.admin, "", "  ")
+	if err != nil {
+		log.Println("error creating audit content")
+		log.Println(err.Error())
+		return
+	}
+
+	reportPath := fmt.Sprintf("./audit_%s_accounts_%s_%s.txt", tPlatform.admin.User.Name, c.String("env"), time.Now().UTC().Format(time.RFC3339))
+
+	f, err := os.Create(reportPath)
+	if err != nil {
+		log.Println("error creating audit file")
+		log.Println(err.Error())
+		return
+	}
+	defer f.Close()
+	f.Write(jsonRpt)
+	log.Println("done! here is the audit " + reportPath)
+
+	log.Println("process took ", time.Now().Sub(start).Seconds(), "seconds")
 	return
+
 }
 
 // and audit will find all account linked
 func prepareAuditReport(c *cli.Context) {
 
 	if c.String("reportpath") == "" {
-		log.Fatal("Please specify the environment your running against with the --env or -e flag.")
+		log.Fatal("Please specify the path to the report")
 	}
 
-	adminUser := &admin{}
-	err := adminUser.loadExistingReport(c.String("reportpath"))
+	theAdmin := &admin{}
+	err := theAdmin.loadExistingReport(c.String("reportpath"))
 	if err != nil {
 		log.Println("error loading existing report")
 		log.Println(err.Error())
 		return
 	}
 
-	log.Println("accounts in audit", len(adminUser.Accounts))
+	log.Println("accounts in audit", len(theAdmin.Users))
 
-	var toReport Basics
+	var toReport Users
 
 	if c.Bool("uploads") {
-		toReport = adminUser.Accounts.hasUploads().sortByName().ToBasics()
+		toReport = theAdmin.Users.hasUploads().sortByName()
 		log.Println("accounts w uploads", len(toReport))
 	} else {
-		toReport = adminUser.Accounts.sortByName().ToBasics()
+		toReport = theAdmins.Users.sortByName()
 		log.Println("accounts w-out uploads", len(toReport))
 	}
 
