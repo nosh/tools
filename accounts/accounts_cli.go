@@ -437,7 +437,7 @@ func prepareAuditReport(c *cli.Context) {
 		toReport = theAdmin.Users.hasUploads().sortByName()
 		log.Println("accounts w uploads", len(toReport))
 	} else {
-		toReport = theAdmins.Users.sortByName()
+		toReport = theAdmin.Users.sortByName()
 		log.Println("accounts w-out uploads", len(toReport))
 	}
 
