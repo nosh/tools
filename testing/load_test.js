@@ -5,6 +5,7 @@ var program = require('commander');
 var superagent = require('superagent');
 var randomstring = require('randomstring');
 var async = require('async');
+var fs = require('fs');
 
 var tidepoolPlatform = require('tidepool-platform-client');
 var storage = require('./node_modules/tidepool-platform-client/lib/inMemoryStorage');
@@ -12,6 +13,8 @@ var storage = require('./node_modules/tidepool-platform-client/lib/inMemoryStora
 var CARELINK_CLI_PATH = './node_modules/tidepool-uploader/lib/carelink/cli/csv_loader.js'
 var INSULET_CLI_PATH = './node_modules/tidepool-uploader/lib/insulet/cli/ibf_loader.js';
 var UPLOAD_CONFIG_PATH = './node_modules/tidepool-uploader/config/local.sh'
+
+var ACCOUNTS_FILE = 'load_test_accounts.json';
 
 var pjson = require('./package.json');
 
@@ -50,7 +53,7 @@ function createAccount(client, cb){
       readable: true,
       charset: 'alphabetic'
     });
-    return un+"+skipit@tidepool.ninja";
+    return un+"+skip@tidepool.ninja";
   };
 
   var un = newUsername();
@@ -66,7 +69,6 @@ function createAccount(client, cb){
   async.waterfall([
     function(callback) {
       //Create Account
-      console.log('adding ',user);
       client.signup(user, {}, function(err, details){
         user.id = details.userid;
         callback(err, details.userid);
@@ -78,8 +80,16 @@ function createAccount(client, cb){
       });
     }
   ], function (err, result) {
-    //Done and dusted with no errors we hope
-    return cb(err, user);
+
+    var basics = {
+      id: user.id,
+      username: user.username,
+      password: user.password,
+      uploads: [],
+      downloads: []
+    };
+
+    return cb(err, basics);
   });
 }
 
@@ -90,74 +100,89 @@ function uploadData(details, cb){
 
   child = exec('node '+INSULET_CLI_PATH+' -f '+details.file+' -u '+details.username+' -p '+details.password,
     function (error, stdout, stderr) {
+      var finish = new Date();
       if (error !== null) {
-        console.log('error uploading data: ' + error);
-        return cb(error);
+        console.log('error uploading data: ', error);
       }
-      console.log('upload took',  new Date() - start, 'millis');
-      return cb();
+      return cb(error, {started: start , finished: finish, elapsedMs: finish-start });
   });
 }
 
-function readData(client, userid, cb){
+function readData(client, details, cb){
   var start = new Date();
-  client.getDeviceDataForUser(userid, function(err, resp){
-    if (err) {
+  client.getDeviceDataForUser(details.userid, function(err, resp){
+    var finish = new Date();
+    if (err !== null) {
       console.log('error reading data: ', err);
     }
-    console.log('download took', new Date() - start ,'millis');
-    return cb(err);
+    return cb(err, {started: start , finished: finish, elapsedMs: finish-start });
   });
 }
 
 function runForOne(client, cb){
+
+  console.log('starting user test run ...');
+
   async.waterfall([
       function(callback) {
-        console.log('creating account ...');
         createAccount(client, function(err, account){
-          //console.log('account', account);
           callback(err, account);
         });
       },
       function(account, callback) {
-        console.log('uploading data ...');
         var details = {
+          note: 'first upload',
+          userid:account.id,
           username: account.username,
           password: account.password,
           file: '/Users/jhbate/Documents/Tidepool/src/data/2015.03.18_MM.ibf'
         };
 
-        uploadData(details, function(err){
+        uploadData(details, function(err, upload){
+          account.uploads.push(upload);
           callback(err, account);
         });
       },
       function(account, callback) {
-        console.log('reading data ...');
-        readData(client, account.id, function(err){
-          callback(err, account);
-        });
-      },
-      function(account, callback) {
-        console.log('uploading data AGAIN ...');
+
         var details = {
+          note: 'first download',
+          userid:account.id
+        };
+
+        readData(client, details, function(err, download){
+          account.downloads.push(download);
+          callback(err, account);
+        });
+      },
+      function(account, callback) {
+        var details = {
+          note: 'second upload',
+          userid:account.id,
           username:account.username,
           password:account.password,
           file: '/Users/jhbate/Documents/Tidepool/src/data/2015.03.18_MM.ibf'
         };
 
-        uploadData(details, function(err){
+        uploadData(details, function(err, upload){
+          account.uploads.push(upload);
           callback(err, account);
         });
       },
       function(account, callback) {
-        console.log('reading data AGAIN ...');
-        readData(client, account.id, function(err){
-          callback(err);
+        var details = {
+          note: 'second download',
+          userid:account.id
+        };
+        readData(client, details, function(err, download){
+          account.downloads.push(download);
+          callback(err, account);
         });
       }
     ], function (err, result) {
       //Done and dusted with no errors we hope
-      return cb(err);
+      console.log('finished user test run');
+      return cb(err, result);
     });
 }
 
@@ -169,7 +194,8 @@ program
   .version('0.0.1')
   .option('-u, --username [user]', 'username')
   .option('-p, --password [pw]', 'password')
-  .option('-n, --number [num]', 'simultaneous users to simulate load for', 5)
+  .option('-s, --simultaneous', 'number of simultaneous users to simulate load for', 5)
+  .option('-c, --cycles [cyc]', 'number of cyles to run the test for', 5)
   .parse(process.argv);
 
 console.log(intro, 'Starting load test ...');
@@ -182,22 +208,46 @@ if(program.username && program.password) {
       return
     }
 
+    //Hack but good enough for now
     var users = [];
-
-    for (var i = program.number - 1; i >= 0; i--) {
+    for (var i = program.simultaneous - 1; i >= 0; i--) {
       users.push(i);
     };
 
-    async.each(users, function(user, callback) {
-      runForOne(client, callback);
-    }, function(err){
-      if( err ) {
-        console.log('A test run failed');
-      } else {
-        console.log('All tests run');
-      }
-      process.exit();
-    });
+    var count = 0;
+    var report = {
+      runs:[]
+    };
+
+    async.whilst(
+        function () { return count < program.cycles; }, //how many cycles of the test are we running
+        function (cb) {
+          count++;
+          console.log('starting testing cycle ', count ,'out of',program.cycles);
+          var run = { runNumber: count, started: new Date(), finished: '', users:[] };
+
+          async.each(users, function(user, cb) {  //start test run for all simultaneous users
+            runForOne(client, function(err, runDetails){
+              run.users.push(runDetails);
+              cb(err);
+            });
+          }, function(err){
+            if( err ) {
+              console.log('A test run failed');
+              cb(err);
+            } else {
+              console.log('finished testing cycle',count, 'out of',program.cycles);
+            }
+            run.finished = new Date();
+            report.runs.push(run);
+            cb();
+          });
+        },
+        function (err) {
+          fs.appendFileSync(ACCOUNTS_FILE, JSON.stringify(report));
+          process.exit();
+        }
+    );
   });
 
 }else{
