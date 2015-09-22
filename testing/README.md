@@ -1,6 +1,6 @@
 # tidepool-loadtest
 
-Cmd-line testing tool that simulates x number of users simultaneously using the platform
+Cmd-line testing tool that simulates x number of users simultaneously using the platform for x number of cycles through the process
 
 ## Getting Started
 Install the module with: `npm install`
@@ -8,12 +8,29 @@ Install the module with: `npm install`
 ## Documentation
 
 ```
-node load_test.js -u <master-account> -p <master-account-password> -n <number-simultaneous-users>
+> source config.sh
+```
+
+```
+Usage: load_test [options]
+
+  Options:
+
+    -h, --help              output usage information
+    -V, --version           output the version number
+    -u, --username [user]   username
+    -p, --password [pw]     password
+    -s, --simultaneous <n>  number of simultaneous users to simulate load for
+    -c, --cycles <n>        number of cyles to run the test for
+```
+
+```
+> node load_test.js -u myaccount@testing.org -p mypassword -s 10 -c 3
 ```
 
 ## Release History
 
-* 0.1.0 -- <date> -- initial creation, by Jamie Bate
+* 0.1.0 -- 2015-09-20 -- initial creation, by Jamie Bate
 
 ## License
  == BSD2 LICENSE ==

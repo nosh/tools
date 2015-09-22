@@ -21,5 +21,3 @@ node_modules
 *.iml
 
 trelloSync.json
-
-testing/load_test_accounts.json

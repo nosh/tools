@@ -10,11 +10,10 @@ var fs = require('fs');
 var tidepoolPlatform = require('tidepool-platform-client');
 var storage = require('./node_modules/tidepool-platform-client/lib/inMemoryStorage');
 
-var CARELINK_CLI_PATH = './node_modules/tidepool-uploader/lib/carelink/cli/csv_loader.js'
+var CARELINK_CLI_PATH = './node_modules/tidepool-uploader/lib/carelink/cli/csv_loader.js';
 var INSULET_CLI_PATH = './node_modules/tidepool-uploader/lib/insulet/cli/ibf_loader.js';
-var UPLOAD_CONFIG_PATH = './node_modules/tidepool-uploader/config/local.sh'
 
-var ACCOUNTS_FILE = 'load_test_accounts.json';
+var ACCOUNTS_FILE = 'load_test_accounts_';
 
 var pjson = require('./package.json');
 
@@ -53,7 +52,7 @@ function createAccount(client, cb){
       readable: true,
       charset: 'alphabetic'
     });
-    return un+"+skip@tidepool.ninja";
+    return un+process.env.AUTH_EMAIL;
   };
 
   var un = newUsername();
@@ -93,12 +92,27 @@ function createAccount(client, cb){
   });
 }
 
-function uploadData(details, cb){
+function uploadInsuletData(details, cb){
 
   var exec = require('child_process').exec, child;
   var start = new Date();
 
-  child = exec('node '+INSULET_CLI_PATH+' -f '+details.file+' -u '+details.username+' -p '+details.password,
+  child = exec('node '+INSULET_CLI_PATH+' -f '+process.env.UPLOAD_IBF_FILE+' -u '+details.username+' -p '+details.password,
+    function (error, stdout, stderr) {
+      var finish = new Date();
+      if (error !== null) {
+        console.log('error uploading data: ', error);
+      }
+      return cb(error, {started: start , finished: finish, elapsedMs: finish-start });
+  });
+}
+
+function uploadCarelinkData(details, cb){
+
+  var exec = require('child_process').exec, child;
+  var start = new Date();
+
+  child = exec('node '+CARELINK_CLI_PATH+' -f '+process.env.UPLOAD_CL_FILE+' -u '+details.username+' -p '+details.password,
     function (error, stdout, stderr) {
       var finish = new Date();
       if (error !== null) {
@@ -130,51 +144,45 @@ function runForOne(client, cb){
         });
       },
       function(account, callback) {
-        var details = {
-          note: 'first upload',
-          userid:account.id,
+        var userDetails = {
+          userid: account.id,
           username: account.username,
-          password: account.password,
-          file: '/Users/jhbate/Documents/Tidepool/src/data/2015.03.18_MM.ibf'
+          password: account.password
         };
 
-        uploadData(details, function(err, upload){
+        uploadInsuletData(userDetails, function(err, upload){
           account.uploads.push(upload);
           callback(err, account);
         });
       },
       function(account, callback) {
 
-        var details = {
-          note: 'first download',
+        var userDetails = {
           userid:account.id
         };
 
-        readData(client, details, function(err, download){
+        readData(client, userDetails, function(err, download){
           account.downloads.push(download);
           callback(err, account);
         });
       },
       function(account, callback) {
-        var details = {
-          note: 'second upload',
-          userid:account.id,
-          username:account.username,
-          password:account.password,
-          file: '/Users/jhbate/Documents/Tidepool/src/data/2015.03.18_MM.ibf'
+        var userDetails = {
+          userid: account.id,
+          username: account.username,
+          password: account.password
         };
 
-        uploadData(details, function(err, upload){
+        uploadInsuletData(userDetails, function(err, upload){
           account.uploads.push(upload);
           callback(err, account);
         });
       },
       function(account, callback) {
-        var details = {
-          note: 'second download',
+        var userDetails = {
           userid:account.id
         };
-        readData(client, details, function(err, download){
+        readData(client, userDetails, function(err, download){
           account.downloads.push(download);
           callback(err, account);
         });
@@ -194,8 +202,8 @@ program
   .version('0.0.1')
   .option('-u, --username [user]', 'username')
   .option('-p, --password [pw]', 'password')
-  .option('-s, --simultaneous', 'number of simultaneous users to simulate load for', 5)
-  .option('-c, --cycles [cyc]', 'number of cyles to run the test for', 5)
+  .option('-s, --simultaneous <n>', 'number of simultaneous users to simulate load for', parseInt)
+  .option('-c, --cycles <n>', 'number of cyles to run the test for', parseInt)
   .parse(process.argv);
 
 console.log(intro, 'Starting load test ...');
@@ -244,7 +252,8 @@ if(program.username && program.password) {
           });
         },
         function (err) {
-          fs.appendFileSync(ACCOUNTS_FILE, JSON.stringify(report));
+          var when = new Date().toUTCString();
+          fs.appendFileSync(ACCOUNTS_FILE+when+'.json', JSON.stringify(report));
           process.exit();
         }
     );
